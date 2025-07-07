@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy import stats
-import plotly.figure_factory as ff
 import plotly.graph_objects as go
 
 def calculate_confidence_interval(data, confidence=0.95):
@@ -21,7 +20,11 @@ def calculate_confidence_interval(data, confidence=0.95):
 
 def clean_numeric_data(series):
     """Clean data, handle special cases"""
+    # Ensure the input is treated as a string for replacement operations
     series = series.astype(str)
+    # The following line seems intended to remove trailing dots, but might be incorrect.
+    # A more robust way would be to handle various non-numeric characters.
+    # For now, keeping the original logic but noting it.
     series = series.str.replace(' .', '', regex=False)
     series = series.str.strip()
     return pd.to_numeric(series, errors='coerce')
@@ -107,9 +110,30 @@ def calculate_group_comparison(group1_data, group2_data, confidence_decimal):
 
 def main():
     st.title('Statistical Analysis Tool')
+
+    # --- MODIFIED: Initialize session state for all persistent variables ---
+    if 'analysis_ran' not in st.session_state:
+        st.session_state.analysis_ran = False
+    if 'plot_title' not in st.session_state:
+        st.session_state.plot_title = "Distribution Comparison"
+    if 'x_axis_title' not in st.session_state:
+        st.session_state.x_axis_title = "Value"
+    if 'y_axis_title' not in st.session_state:
+        st.session_state.y_axis_title = "Count"
+    if 'group1_legend' not in st.session_state:
+        st.session_state.group1_legend = "Group 1"
+    if 'group2_legend' not in st.session_state:
+        st.session_state.group2_legend = "Group 2"
     
-    uploaded_file = st.file_uploader("Upload Excel/CSV file", type=['xlsx', 'xls', 'csv'])
+    uploaded_file = st.file_uploader("Upload Excel/CSV file", type=['xlsx', 'xls', 'csv'], key="file_uploader")
     
+    # When a new file is uploaded, reset the analysis state
+    if 'last_uploaded_file' not in st.session_state:
+        st.session_state.last_uploaded_file = None
+    if uploaded_file is not None and uploaded_file.file_id != st.session_state.last_uploaded_file:
+        st.session_state.analysis_ran = False
+        st.session_state.last_uploaded_file = uploaded_file.file_id
+
     confidence_level = st.number_input(
         "Enter Confidence Level (0-100)",
         min_value=1,
@@ -145,10 +169,17 @@ def main():
                 group2_cols = st.multiselect('Select columns', all_columns, key='group2')
             
             col1, col2 = st.columns(2)
-            t_test_button = col1.button('Perform T-Test')
-            wilcoxon_button = col2.button('Perform Wilcoxon Test')
+
+            if col1.button('Perform T-Test'):
+                st.session_state.analysis_type = 't_test'
+                st.session_state.analysis_ran = True
             
-            if (t_test_button or wilcoxon_button) and group1_cols and group2_cols:
+            if col2.button('Perform Wilcoxon Test'):
+                st.session_state.analysis_type = 'wilcoxon'
+                st.session_state.analysis_ran = True
+
+            # --- MODIFIED: Main logic block now depends on session state ---
+            if st.session_state.analysis_ran and group1_cols and group2_cols:
                 try:
                     group1_data = df[group1_cols].apply(clean_numeric_data).mean(axis=1)
                     group2_data = df[group2_cols].apply(clean_numeric_data).mean(axis=1)
@@ -236,14 +267,17 @@ def main():
                         })
                         st.dataframe(quartile_df)
                         
-                        if t_test_button:
+                        if st.session_state.analysis_type == 't_test':
                             # T-test analysis
                             t_stat, p_value = stats.ttest_ind(valid_data['group1'], valid_data['group2'])
                             dof = len(valid_data['group1']) + len(valid_data['group2']) - 2
                             # Calculate Cohen's d
                             mean_diff = valid_data['group1'].mean() - valid_data['group2'].mean()
                             pooled_std = np.sqrt(((len(valid_data['group1']) - 1) * valid_data['group1'].var() + (len(valid_data['group2']) - 1) * valid_data['group2'].var()) / dof)
-                            cohens_d = mean_diff / pooled_std
+                            if pooled_std == 0:
+                                cohens_d = np.nan # Avoid division by zero
+                            else:
+                                cohens_d = mean_diff / pooled_std
                             
                             st.subheader('T-Test Results')
                             results_df = pd.DataFrame({
@@ -256,8 +290,8 @@ def main():
                                 ]
                             })
                             st.dataframe(results_df)
-                            
-                        elif wilcoxon_button:
+                        
+                        elif st.session_state.analysis_type == 'wilcoxon':
                             # Wilcoxon test analysis
                             w_stat, w_pvalue, effect_size = perform_wilcoxon_test(
                                 valid_data['group1'], 
@@ -305,59 +339,142 @@ def main():
                         # Box plot
                         st.subheader('Box Plot Comparison')
                         fig_box = go.Figure()
-                        fig_box.add_trace(go.Box(y=valid_data['group1'], name='Group 1'))
-                        fig_box.add_trace(go.Box(y=valid_data['group2'], name='Group 2'))
+                        fig_box.add_trace(go.Box(y=valid_data['group1'], name='Group 1', marker_color='#1f77b4'))
+                        fig_box.add_trace(go.Box(y=valid_data['group2'], name='Group 2', marker_color='#ff7f0e'))
                         st.plotly_chart(fig_box)
                         
-                        # Distribution plot (Side-by-side Bar Chart)
-                        st.subheader('Distribution Plot')
-
-                        # Determine a shared, appropriate bin range for both datasets
-                        combined_data = pd.concat([valid_data['group1'], valid_data['group2']])
-                        min_val = combined_data.min()
-                        max_val = combined_data.max()
+                        # Distribution Plot Section
+                        st.subheader('Distribution Plot with Density Curve')
                         
-                        # Use Freedman-Diaconis rule to determine optimal bin width, leading to bin number
-                        iqr = combined_data.quantile(0.75) - combined_data.quantile(0.25)
-                        n_combined = len(combined_data)
-                        if iqr > 0 and n_combined > 0:
-                            bin_width = (2 * iqr) / (n_combined ** (1/3))
-                            num_bins = int((max_val - min_val) / bin_width)
-                        else:
-                            num_bins = 20 # Fallback to a default number of bins
+                        # Use a form to prevent reruns on every character input
+                        with st.form(key='plot_labels_form'):
+                            st.write("Customize Plot Labels:")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                plot_title_input = st.text_input("Plot Title", st.session_state.plot_title)
+                                x_axis_title_input = st.text_input("X-Axis Title", st.session_state.x_axis_title)
+                                y_axis_title_input = st.text_input("Y-Axis Title", st.session_state.y_axis_title)
+                            with col2:
+                                group1_legend_input = st.text_input("Group 1 Legend", st.session_state.group1_legend)
+                                group2_legend_input = st.text_input("Group 2 Legend", st.session_state.group2_legend)
+                            
+                            submitted = st.form_submit_button("Update Plot Labels")
+                            if submitted:
+                                st.session_state.plot_title = plot_title_input
+                                st.session_state.x_axis_title = x_axis_title_input
+                                st.session_state.y_axis_title = y_axis_title_input
+                                st.session_state.group1_legend = group1_legend_input
+                                st.session_state.group2_legend = group2_legend_input
+                                # No rerun needed, the script will flow down and redraw the plot with new labels
 
-                        # Calculate histograms for both groups using the same bins
-                        hist1, bins = np.histogram(valid_data['group1'], bins=num_bins, range=(min_val, max_val))
-                        hist2, _ = np.histogram(valid_data['group2'], bins=num_bins, range=(min_val, max_val))
-                        
-                        # Calculate the center of each bin for plotting
-                        bin_centers = (bins[:-1] + bins[1:]) / 2
 
+                        # Create figure with a single y-axis
                         fig_dist = go.Figure()
 
-                        # Add Bar trace for Group 1
-                        fig_dist.add_trace(go.Bar(
-                            x=bin_centers,
-                            y=hist1,
-                            name='Group 1'
-                        ))
+                        # Define colors
+                        color1 = '#1f77b4'  # Blue
+                        color2 = '#ff7f0e'  # Orange
+                        
+                        # Prepare data
+                        group1_dist_data = valid_data['group1'].dropna()
+                        group2_dist_data = valid_data['group2'].dropna()
 
-                        # Add Bar trace for Group 2
-                        fig_dist.add_trace(go.Bar(
-                            x=bin_centers,
-                            y=hist2,
-                            name='Group 2'
-                        ))
+                        # Determine binning strategy for histograms
+                        if group1_dist_data.empty or group2_dist_data.empty:
+                            st.warning("One or both groups have no data to plot.")
+                            return
+                        
+                        combined_min = min(group1_dist_data.min(), group2_dist_data.min())
+                        combined_max = max(group1_dist_data.max(), group2_dist_data.max())
 
-                        # Update layout to group the bars side-by-side
-                        fig_dist.update_layout(
-                            barmode='group', # This is the key to making bars appear side-by-side
-                            xaxis_title="Score",
-                            yaxis_title="Frequency/Count",
-                            showlegend=True,
-                            bargap=0.15, # Optional: Adjusts the gap between bars of different groups
-                            bargroupgap=0.1 # Optional: Adjusts the gap between bars within a group
+                        # --- Calculate Histogram Data ---
+                        bins = int(combined_max - combined_min) + 1
+                        hist1_counts, hist1_bins = np.histogram(group1_dist_data, bins=bins, range=(combined_min, combined_max))
+                        hist2_counts, hist2_bins = np.histogram(group2_dist_data, bins=bins, range=(combined_min, combined_max))
+                        
+                        # Get overall max count for y-axis range
+                        max_count = max(hist1_counts.max(), hist2_counts.max()) if len(hist1_counts)>0 and len(hist2_counts)>0 else 0
+
+
+                        # Add histogram traces (bars)
+                        fig_dist.add_trace(
+                            go.Histogram(
+                                x=group1_dist_data, 
+                                name=st.session_state.group1_legend, 
+                                marker=dict(color=color1, line=dict(width=0)), # Remove bar outlines
+                                xbins=dict(start=combined_min, end=combined_max, size=1)
+                            )
                         )
+                        fig_dist.add_trace(
+                            go.Histogram(
+                                x=group2_dist_data, 
+                                name=st.session_state.group2_legend, 
+                                marker=dict(color=color2, line=dict(width=0)), # Remove bar outlines
+                                xbins=dict(start=combined_min, end=combined_max, size=1)
+                            )
+                        )
+
+                        # --- Calculate and add Scaled KDE traces (lines) ---
+                        x_range = np.linspace(combined_min, combined_max, 500)
+                        max_density = 0
+                        y1_kde, y2_kde = None, None
+
+                        # Calculate KDE for Group 1 to find max density
+                        try:
+                            if len(group1_dist_data) > 1:
+                                kde1 = stats.gaussian_kde(group1_dist_data)
+                                y1_kde = kde1(x_range)
+                                max_density = max(max_density, y1_kde.max())
+                        except Exception: pass
+
+                        # Calculate KDE for Group 2 to find max density
+                        try:
+                            if len(group2_dist_data) > 1:
+                                kde2 = stats.gaussian_kde(group2_dist_data)
+                                y2_kde = kde2(x_range)
+                                max_density = max(max_density, y2_kde.max())
+                        except Exception: pass
+                        
+                        # Calculate scaling factor
+                        scaling_factor = (max_count / max_density) if max_density > 0 else 1
+
+                        # Add scaled KDE traces
+                        if y1_kde is not None:
+                            fig_dist.add_trace(
+                                go.Scatter(x=x_range, y=y1_kde * scaling_factor, mode='lines', line=dict(color=color1), showlegend=False)
+                            )
+                        if y2_kde is not None:
+                             fig_dist.add_trace(
+                                go.Scatter(x=x_range, y=y2_kde * scaling_factor, mode='lines', line=dict(color=color2), showlegend=False)
+                            )
+
+                        # Update layout with improved fonts and a single Y-axis
+                        fig_dist.update_layout(
+                            title_text=f'<b>{st.session_state.plot_title}</b>',
+                            title_font_size=24,
+                            barmode='group',
+                            xaxis_title=f'<b>{st.session_state.x_axis_title}</b>',
+                            xaxis_title_font_size=20,
+                            yaxis_title=f'<b>{st.session_state.y_axis_title}</b>',
+                            yaxis_title_font_size=20,
+                            legend_title_text='',
+                            font=dict(family="Arial Black, sans-serif"),
+                            # --- MODIFIED: Tighter x-axis range ---
+                            xaxis_range=[combined_min - 0.5, combined_max + 0.5]
+                        )
+                        
+                        # Set y-axes titles and fonts with improved fonts and aligned zero
+                        fig_dist.update_yaxes(
+                            tickfont=dict(color='black', size=18, family='Arial Black'),
+                            showgrid=True, gridwidth=1, gridcolor='LightGray',
+                            range=[0, max_count * 1.15]
+                        )
+                        fig_dist.update_xaxes(
+                            tickfont=dict(color='black', size=18, family='Arial Black'),
+                            showgrid=False
+                        )
+
+
                         st.plotly_chart(fig_dist)
                         
                     else:
